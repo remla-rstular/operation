@@ -1,25 +1,38 @@
 services:
   modelservice:
-    image: ghcr.io/remla-rstular/model_service:0.0.2
+    image: ghcr.io/remla-rstular/model_service:${MODEL_SERVICE_VERSION}
     environment:
       - PORT=9999
       - MODEL_CACHE_DIR=/data/model_cache
+      - AUTH_TOKEN_FILE=/run/secrets/auth_token
+    restart: unless-stopped
+    secrets:
+      - auth_token
     volumes:
       - model_data:/data
 
   app:
-    image: ghcr.io/remla-rstular/app:0.0.4
+    image: ghcr.io/remla-rstular/app:${APP_VERSION}
     environment:
       - MODEL_SERVICE_URL=http://modelservice:9999
       - SQLITE_DB_PATH=/data/db.sqlite
       - PORT=8001
+      - AUTH_TOKEN_FILE=/run/secrets/auth_token
     ports:
-      - "8001:8001"
+      - "${APP_PORT}:8001"
+    restart: unless-stopped
     depends_on:
       - modelservice
+    secrets:
+      - auth_token
     volumes:
       - app_data:/data
 
 volumes:
   model_data:
   app_data:
+
+
+secrets:
+  auth_token:
+    file: ./auth_token.txt
