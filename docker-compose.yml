@@ -1,0 +1,25 @@
+services:
+  modelservice:
+    image: ghcr.io/remla-rstular/model_service:0.0.2
+    environment:
+      - PORT=9999
+      - MODEL_CACHE_DIR=/data/model_cache
+    volumes:
+      - model_data:/data
+
+  app:
+    image: ghcr.io/remla-rstular/app:0.0.4
+    environment:
+      - MODEL_SERVICE_URL=http://modelservice:9999
+      - SQLITE_DB_PATH=/data/db.sqlite
+      - PORT=8001
+    ports:
+      - "8001:8001"
+    depends_on:
+      - modelservice
+    volumes:
+      - app_data:/data
+
+volumes:
+  model_data:
+  app_data:
