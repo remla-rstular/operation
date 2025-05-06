@@ -26,12 +26,10 @@ services:
     secrets:
       - auth_token
     volumes:
-      - app_data:/data
+      - ./data_app:/data
 
 volumes:
   model_data:
-  app_data:
-
 
 secrets:
   auth_token:
