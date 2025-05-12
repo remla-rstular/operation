@@ -1,0 +1,102 @@
+---
+- hosts: ctrl
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Install kubernetes python package
+      apt:
+        name: python3-kubernetes
+        state: present
+
+    - name: Check if kubeadm config already exists
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_config
+
+    - name: Initialize Kubernetes control plane
+      command: >
+        kubeadm init
+        --apiserver-advertise-address={{ ansible_eth1.ipv4.address }}
+        --node-name={{ inventory_hostname }}
+        --pod-network-cidr=10.244.0.0/16
+      when: not kubeadm_config.stat.exists
+      register: kubeadm_init_output
+
+    - name: Create .kube directory for vagrant user
+      file:
+        path: /home/vagrant/.kube
+        state: directory
+        owner: vagrant
+        group: vagrant
+        mode: "0755"
+      when: not kubeadm_config.stat.exists
+
+    - name: Copy kubeconfig to vagrant user's home directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/vagrant/.kube/config
+        owner: vagrant
+        group: vagrant
+        mode: "0644"
+        remote_src: yes
+      when: not kubeadm_config.stat.exists
+
+    - name: Copy kubeconfig to Ansible control machine
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: ./kubeconfig/admin-{{ inventory_hostname }}.conf  # Saves with unique name
+        flat: yes
+      when: not kubeadm_config.stat.exists
+
+    - name: Check if Flannel DaemonSet already exists
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: DaemonSet
+        namespace: kube-flannel
+        name: kube-flannel-ds
+        kubeconfig: /home/vagrant/.kube/config
+      register: flannel_ds
+      ignore_errors: yes
+
+    - name: Download kube-flannel manifest
+      get_url:
+        url: https://github.com/flannel-io/flannel/releases/download/v0.26.7/kube-flannel.yml
+        dest: /tmp/kube-flannel.yml
+      when: (flannel_ds is failed) or (flannel_ds.resources | default([]) | length == 0)
+
+    - name: Add --interface=eth to flannel container args
+      replace:
+        path: /tmp/kube-flannel.yml
+        regexp: '(args:\n\s+- --ip-masq\n\s+- --kube-subnet-mgr)(\n\s+- [^-])?'
+        replace: '\1\n        - --iface\n        - eth1\2'
+      when: (flannel_ds is failed) or (flannel_ds.resources | default([]) | length == 0)
+
+    - name: Apply kube-flannel manifest
+      command: kubectl apply -f /tmp/kube-flannel.yml --kubeconfig=/home/vagrant/.kube/config
+      when: (flannel_ds is failed) or (flannel_ds.resources | default([]) | length == 0)
+
+    - name: Add helm APT key
+      apt_key:
+        url: https://baltocdn.com/helm/signing.asc
+        state: present
+
+    - name: Add helm APT repository
+      apt_repository:
+        repo: deb https://baltocdn.com/helm/stable/debian/ all main
+        state: present
+        update_cache: yes
+
+    - name: Install helm
+      apt:
+        name: helm
+        state: present
+
+    - name: Check if helm-diff plugin is already installed
+      command: helm plugin list
+      register: helm_plugins
+      failed_when: helm_plugins.rc > 1
+      changed_when: "'diff\t' not in helm_plugins.stdout"
+
+    - name: Install helm-diff plugin
+      command: helm plugin install https://github.com/databus23/helm-diff
+      when: "'diff\t' not in helm_plugins.stdout"

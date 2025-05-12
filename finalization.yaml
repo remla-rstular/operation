@@ -1,0 +1,150 @@
+---
+- name: Finalize Kubernetes cluster setup
+  hosts: all
+  become: yes
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - jq
+          - curl
+        state: present
+        update_cache: yes
+
+    - name: Create directory for manifests
+      file:
+        path: /tmp/k8s-manifests
+        state: directory
+        mode: "0755"
+
+    - name: Install MetalLB CRDs
+      kubernetes.core.k8s:
+        state: present
+        src: https://raw.githubusercontent.com/metallb/metallb/v0.14.9/config/manifests/metallb-native.yaml
+      register: metallb_install
+      until: metallb_install is not failed
+      retries: 3
+      delay: 5
+
+    - name: Wait for MetalLB to be ready
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: metallb-system
+        label_selectors:
+          - "app=metallb"
+          - "component=controller"
+      register: metallb_pods
+      until: metallb_pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+      retries: 10
+      delay: 10
+
+    - name: Create IPAddressPool for MetalLB
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: IPAddressPool
+          metadata:
+            name: default-pool
+            namespace: metallb-system
+          spec:
+            addresses:
+              - 192.168.56.90-192.168.56.99
+
+    - name: Create L2Advertisement for MetalLB
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: metallb.io/v1beta1
+          kind: L2Advertisement
+          metadata:
+            name: default-advertisement
+            namespace: metallb-system
+          spec:
+            ipAddressPools:
+              - default-pool
+
+    - name: Add ingress-nginx Helm repository
+      community.kubernetes.helm_repository:
+        name: ingress-nginx
+        repo_url: https://kubernetes.github.io/ingress-nginx
+
+    - name: Install ingress-nginx chart
+      community.kubernetes.helm:
+        name: ingress-nginx
+        chart_ref: ingress-nginx/ingress-nginx
+        release_namespace: ingress-nginx
+        create_namespace: true
+        values:
+          controller:
+            service:
+              type: LoadBalancer
+              loadBalancerIP: 192.168.56.90
+            admissionWebhooks:
+              enabled: false
+            metrics:
+              enabled: true
+
+    - name: Add kubernetes-dashboard Helm repository
+      community.kubernetes.helm_repository:
+        name: kubernetes-dashboard
+        repo_url: https://kubernetes.github.io/dashboard/
+
+    - name: Install kubernetes-dashboard chart
+      community.kubernetes.helm:
+        name: kubernetes-dashboard
+        chart_ref: kubernetes-dashboard/kubernetes-dashboard
+        release_namespace: kubernetes-dashboard
+        create_namespace: true
+
+    - name: Create admin user ServiceAccount
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: admin-user
+            namespace: kubernetes-dashboard
+
+    - name: Create ClusterRoleBinding for admin user
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: admin-user
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: cluster-admin
+          subjects:
+            - kind: ServiceAccount
+              name: admin-user
+              namespace: kubernetes-dashboard
+
+    - name: Create Ingress for Kubernetes Dashboard
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: kubernetes-dashboard
+            namespace: kubernetes-dashboard
+            annotations:
+              nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+          spec:
+            ingressClassName: nginx
+            rules:
+              - host: dashboard.local
+                http:
+                  paths:
+                    - path: /
+                      pathType: Prefix
+                      backend:
+                        service:
+                          name: kubernetes-dashboard
+                          port:
+                            number: 443
